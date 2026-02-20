@@ -1,0 +1,20 @@
+[Unit]
+Description=OpenClaw TV TTS Daemon (Kitten TTS nano, model pre-warmed)
+Documentation=https://github.com/brtdwchtr/openclaw-tv
+After=network.target
+
+[Service]
+Type=simple
+User=PI_USER
+WorkingDirectory=INSTALL_DIR
+Environment=OPENCLAW_TV_DIR=INSTALL_DIR
+ExecStart=INSTALL_DIR/venv/bin/python INSTALL_DIR/server/tts-daemon.py
+Restart=on-failure
+RestartSec=10
+# Allow slow startup (model loading)
+TimeoutStartSec=120
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

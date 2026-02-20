@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<!--
+  OpenClaw TV Avatar v12
+  Particle cloud avatar with:
+  - Murmuration-style curl noise idle behavior
+  - Snap-compact on audio (BLEND_IN=0.35)
+  - Audio-reactive (bass=expand, mids=jitter, highs=sparkle)
+  - Rolling word-by-word captions (32px, 70% width)
+  - Polls /api/state every 500ms
+-->
+<html>
+<head>
+<style>
+* { cursor: none !important; margin: 0; padding: 0; }
+body { background: black; overflow: hidden; }
+#msg { position: absolute; bottom: 30px; width: 70%; left: 15%; max-height: 25%; text-align: center; font-family: monospace; font-size: 32px; color: white; opacity: 0; transition: opacity 0.5s; pointer-events: none; z-index: 10; overflow: hidden; line-height: 1.3; }
+audio { display: none; }
+</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+<div id="msg"></div>
+<audio id="aud" preload="auto"></audio>
+<script>
+var state={mood:'idle',message:'',audio:''};
+var audioCtx,analyser,dataArray,audioSource,audioEl;
+var bassEnergy=0,midEnergy=0,highEnergy=0,totalEnergy=0;
+var smoothBass=0,smoothMid=0,smoothHigh=0,smoothTotal=0;
+
+function initAudio(){
+  if(audioCtx)return;
+  audioCtx=new(window.AudioContext||window.webkitAudioContext)();
+  analyser=audioCtx.createAnalyser();
+  analyser.fftSize=512;analyser.smoothingTimeConstant=0.6;
+  dataArray=new Uint8Array(analyser.frequencyBinCount);
+  audioEl=document.getElementById('aud');
+  audioSource=audioCtx.createMediaElementSource(audioEl);
+  audioSource.connect(analyser);analyser.connect(audioCtx.destination);
+  if(audioCtx.state==="suspended"){audioCtx.resume();}
+}
+function getAudioData(){
+  if(!analyser)return;
+  analyser.getByteFrequencyData(dataArray);
+  var bins=dataArray.length,bass=0,mid=0,high=0,total=0;
+  for(var i=0;i<bins;i++){
+    var v=dataArray[i]/255;total+=v;
+    if(i<bins*0.12)bass+=v;else if(i<bins*0.45)mid+=v;else high+=v;
+  }
+  bassEnergy=bass/(bins*0.12);
+  midEnergy=mid/(bins*0.33);
+  highEnergy=high/(bins*0.55);
+  totalEnergy=total/bins;
+  smoothBass+=(bassEnergy-smoothBass)*0.55;
+  smoothMid+=(midEnergy-smoothMid)*0.5;
+  smoothHigh+=(highEnergy-smoothHigh)*0.45;
+  smoothTotal+=(totalEnergy-smoothTotal)*0.5;
+}
+
+// === CURL NOISE for murmuration flow fields ===
+function snoise3(x,y,z){
+  return Math.sin(x*1.7+y*2.3)*Math.cos(y*1.9+z*3.1)*Math.sin(z*2.7+x*1.3);
+}
+function curlNoise(x,y,z,t){
+  var e=0.01;
+  var n1,n2;
+  n1=snoise3(x,y+e,z+t);n2=snoise3(x,y-e,z+t);
+  var dzy=(n1-n2)/(2*e);
+  n1=snoise3(x,y+t,z+e);n2=snoise3(x,y+t,z-e);
+  var dyz=(n1-n2)/(2*e);
+  n1=snoise3(x,y,z+e+t);n2=snoise3(x,y,z-e+t);
+  var dxz=(n1-n2)/(2*e);
+  n1=snoise3(x+e,y,z+t);n2=snoise3(x-e,y,z+t);
+  var dzx=(n1-n2)/(2*e);
+  n1=snoise3(x+e,y+t,z);n2=snoise3(x-e,y+t,z);
+  var dyx=(n1-n2)/(2*e);
+  n1=snoise3(x+t,y+e,z);n2=snoise3(x+t,y-e,z);
+  var dxy=(n1-n2)/(2*e);
+  return {x:dzy-dyz, y:dxz-dzx, z:dyx-dxy};
+}
+
+var scene=new THREE.Scene();
+var camera=new THREE.PerspectiveCamera(60,window.innerWidth/window.innerHeight,0.1,1000);
+camera.position.z=4;
+var renderer=new THREE.WebGLRenderer({antialias:false});
+renderer.setSize(window.innerWidth,window.innerHeight);renderer.setPixelRatio(1);
+document.body.appendChild(renderer.domElement);
+
+var COUNT=3000;
+var geometry=new THREE.BufferGeometry();
+var positions=new Float32Array(COUNT*3);
+var basePositions=new Float32Array(COUNT*3);
+var velocities=new Float32Array(COUNT*3);
+var turb=new Float32Array(COUNT);
+var phase=new Float32Array(COUNT);
+
+for(var i=0;i<COUNT;i++){
+  var t=Math.random()*Math.PI*2,p=Math.acos(2*Math.random()-1);
+  var r=1.0+Math.random()*0.3;
+  basePositions[i*3]=r*Math.sin(p)*Math.cos(t);
+  basePositions[i*3+1]=r*Math.sin(p)*Math.sin(t);
+  basePositions[i*3+2]=r*Math.cos(p);
+  positions[i*3]=basePositions[i*3];
+  positions[i*3+1]=basePositions[i*3+1];
+  positions[i*3+2]=basePositions[i*3+2];
+  velocities[i*3]=0;velocities[i*3+1]=0;velocities[i*3+2]=0;
+  turb[i]=Math.random()*3+0.5;
+  phase[i]=Math.random()*Math.PI*2;
+}
+geometry.setAttribute('position',new THREE.BufferAttribute(positions,3));
+var material=new THREE.PointsMaterial({color:0xffffff,size:0.025,sizeAttenuation:true});
+var points=new THREE.Points(geometry,material);
+scene.add(points);
+
+var currentAudio='';
+var captionWords=[];
+var captionIdx=0;
+var captionTimer=null;
+function startCaptions(text,durationSec){
+  var msgEl=document.getElementById('msg');
+  captionWords=text.split(/\s+/);
+  captionIdx=0;
+  msgEl.textContent='';
+  msgEl.style.opacity=1;
+  if(captionTimer)clearInterval(captionTimer);
+  var msPerWord=Math.max(150,(durationSec*1000)/captionWords.length);
+  var WINDOW=6;
+  captionTimer=setInterval(function(){
+    if(captionIdx>=captionWords.length){clearInterval(captionTimer);return;}
+    captionIdx++;
+    var start=Math.max(0,captionIdx-WINDOW);
+    msgEl.textContent=captionWords.slice(start,captionIdx).join(' ');
+  },msPerWord);
+}
+var speaking=false;
+var speakBlend=0;
+var IDLE_RADIUS=1.0;
+var SPEAK_RADIUS=0.55;
+var BLEND_IN=0.35;
+var BLEND_OUT=0.015;
+
+var attractors=[
+  {x:0,y:0,z:0,vx:0,vy:0,vz:0},
+  {x:1,y:0.5,z:0,vx:0,vy:0,vz:0},
+  {x:-0.5,y:-0.8,z:0.3,vx:0,vy:0,vz:0}
+];
+
+function updateAttractors(t){
+  for(var a=0;a<attractors.length;a++){
+    var att=attractors[a];
+    var c=curlNoise(att.x*0.3,att.y*0.3,att.z*0.3,t*0.08+a*10);
+    att.vx+=c.x*0.003;
+    att.vy+=c.y*0.003;
+    att.vz+=c.z*0.003;
+    att.x+=att.vx;att.y+=att.vy;att.z+=att.vz;
+    var d=Math.sqrt(att.x*att.x+att.y*att.y+att.z*att.z);
+    if(d>1.0){att.vx-=att.x*0.02;att.vy-=att.y*0.02;att.vz-=att.z*0.02;}
+    att.vx*=0.98;att.vy*=0.98;att.vz*=0.98;
+  }
+}
+
+function pollState(){
+  fetch('/api/state').then(function(r){return r.json();}).then(function(s){
+    var changed=s.mood!==state.mood||s.message!==state.message;
+    state=s;
+    if(s.audio&&s.audio!==currentAudio){
+      currentAudio=s.audio;initAudio();
+      if(audioCtx&&audioCtx.state==='suspended'){audioCtx.resume();}
+      audioEl.src=s.audio+'?t='+Date.now();
+      audioEl.load();
+      audioEl.play().catch(function(e){console.log('play err',e);});
+      speaking=true;
+      var words=(state.message||'').split(/\s+/).length;
+      var estDuration=Math.max(3,words*0.45);
+      if(state.message)startCaptions(state.message,estDuration);
+      audioEl.onended=function(){
+        speaking=false;
+        captionIdx=captionWords.length;
+        var msgEl=document.getElementById('msg');
+        var WINDOW=6;
+        var start=Math.max(0,captionIdx-WINDOW);
+        msgEl.textContent=captionWords.slice(start,captionIdx).join(' ');
+        if(captionTimer)clearInterval(captionTimer);
+        setTimeout(function(){msgEl.style.opacity=0;},2000);
+      };
+    } else if(changed&&!s.audio){
+      var msgEl=document.getElementById('msg');
+      if(state.message){msgEl.textContent=state.message;msgEl.style.opacity=1;}
+      else{msgEl.style.opacity=0;}
+    }
+  }).catch(function(){});
+}
+setInterval(pollState,500);
+
+var time=0;
+function animate(){
+  requestAnimationFrame(animate);
+  time+=0.016;
+  getAudioData();
+  updateAttractors(time);
+  var pos=geometry.attributes.position.array;
+
+  if(speaking){ speakBlend+=(1-speakBlend)*BLEND_IN; }
+  else{ speakBlend+=(0-speakBlend)*BLEND_OUT; }
+
+  var idleBlend=1-speakBlend;
+  var baseScale=IDLE_RADIUS*(1-speakBlend)+SPEAK_RADIUS*speakBlend;
+  var breathe=1.0+Math.sin(time*0.8)*0.02*(1-speakBlend*0.5);
+
+  var expand=1.0+smoothBass*1.0*speakBlend;
+  var jitter=smoothMid*0.15*speakBlend;
+  var burstChance=smoothHigh*0.1*speakBlend;
+  var swirlAmt=0.2+smoothTotal*0.8*speakBlend;
+  var pullBack=0.04+smoothTotal*0.06+speakBlend*0.04;
+  var damping=0.82-smoothTotal*0.15*speakBlend;
+
+  for(var i=0;i<COUNT;i++){
+    var ix=i*3,iy=i*3+1,iz=i*3+2;
+    var ti=turb[i], ph=phase[i];
+    var px=pos[ix],py=pos[iy],pz=pos[iz];
+    var bx=basePositions[ix],by=basePositions[iy],bz=basePositions[iz];
+
+    // === MURMURATION (idle) ===
+    if(idleBlend>0.01){
+      var curl=curlNoise(px*0.8,py*0.8,pz*0.8,time*0.1+ph*0.1);
+      velocities[ix]+=curl.x*0.003*idleBlend;
+      velocities[iy]+=curl.y*0.003*idleBlend;
+      velocities[iz]+=curl.z*0.003*idleBlend;
+
+      var nearest=0,nearDist=999;
+      for(var a=0;a<attractors.length;a++){
+        var ax=attractors[a].x-px,ay=attractors[a].y-py,az=attractors[a].z-pz;
+        var ad=ax*ax+ay*ay+az*az;
+        if(ad<nearDist){nearDist=ad;nearest=a;}
+      }
+      var att=attractors[nearest];
+      var adx=att.x-px,ady=att.y-py,adz=att.z-pz;
+      var aLen=Math.sqrt(adx*adx+ady*ady+adz*adz)||1;
+      var pullStr=0.004*idleBlend;
+      velocities[ix]+=(adx/aLen)*pullStr+(-ady/aLen)*pullStr*0.3;
+      velocities[iy]+=(ady/aLen)*pullStr+(adx/aLen)*pullStr*0.3;
+      velocities[iz]+=(adz/aLen)*pullStr;
+
+      var ni=((i+1)%COUNT)*3;
+      velocities[ix]+=(velocities[ni]-velocities[ix])*0.02*idleBlend;
+      velocities[iy]+=(velocities[ni+1]-velocities[iy])*0.02*idleBlend;
+      velocities[iz]+=(velocities[ni+2]-velocities[iz])*0.02*idleBlend;
+
+      var dist=Math.sqrt(px*px+py*py+pz*pz);
+      if(dist>1.5){
+        var push=0.012*(dist-1.5)*idleBlend;
+        velocities[ix]-=(px/dist)*push;
+        velocities[iy]-=(py/dist)*push;
+        velocities[iz]-=(pz/dist)*push;
+      }
+    }
+
+    // === SPEAKING (audio reactive) ===
+    if(speakBlend>0.01){
+      var len=Math.sqrt(bx*bx+by*by+bz*bz)||1;
+      var radialPulse=Math.sin(time*12+ph*3)*smoothMid*0.08;
+      velocities[ix]+=(Math.random()-0.5)*jitter+(bx/len)*radialPulse;
+      velocities[iy]+=(Math.random()-0.5)*jitter+(by/len)*radialPulse;
+      velocities[iz]+=(Math.random()-0.5)*jitter*0.7+(bz/len)*radialPulse;
+
+      if(smoothHigh>0.1&&Math.random()<burstChance){
+        velocities[ix]+=(Math.random()-0.5)*0.12;
+        velocities[iy]+=(Math.random()-0.5)*0.12;
+        velocities[iz]+=(Math.random()-0.5)*0.12;
+      }
+
+      velocities[ix]+=-py*swirlAmt*0.002;
+      velocities[iy]+=px*swirlAmt*0.002;
+    }
+
+    pos[ix]+=velocities[ix];
+    pos[iy]+=velocities[iy];
+    pos[iz]+=velocities[iz];
+
+    var scale=baseScale*breathe*expand;
+    var spherePull=speakBlend*pullBack*1.5+idleBlend*0.012;
+    pos[ix]+=(bx*scale-pos[ix])*spherePull;
+    pos[iy]+=(by*scale-pos[iy])*spherePull;
+    pos[iz]+=(bz*scale-pos[iz])*spherePull;
+
+    var d=damping*speakBlend+0.96*idleBlend;
+    velocities[ix]*=d;
+    velocities[iy]*=d;
+    velocities[iz]*=d;
+  }
+
+  geometry.attributes.position.needsUpdate=true;
+
+  points.rotation.y+=0.001+smoothTotal*0.012*speakBlend;
+  points.rotation.x=Math.sin(time*0.15)*0.03;
+
+  material.size=0.02+smoothBass*0.025*speakBlend+idleBlend*0.005*Math.sin(time*0.5);
+
+  renderer.render(scene,camera);
+}
+animate();
+document.addEventListener('click',function(){initAudio();});
+setTimeout(function(){initAudio();},1000);
+window.addEventListener('resize',function(){camera.aspect=window.innerWidth/window.innerHeight;camera.updateProjectionMatrix();renderer.setSize(window.innerWidth,window.innerHeight);});
+</script>
+</body>
+</html>

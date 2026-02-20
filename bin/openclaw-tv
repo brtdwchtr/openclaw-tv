@@ -1,0 +1,210 @@
+#!/usr/bin/env bash
+# openclaw-tv — Main CLI
+# Give your AI agent a physical body.
+set -euo pipefail
+
+INSTALL_DIR="${OPENCLAW_TV_DIR:-$HOME/.openclaw-tv}"
+VENV_PYTHON="$INSTALL_DIR/venv/bin/python"
+SOCK_PATH="/tmp/openclaw-tv-tts.sock"
+STATIC_DIR="$INSTALL_DIR/static"
+CONFIG_FILE="$INSTALL_DIR/config/default.json"
+
+# Colors
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
+err()  { echo -e "${RED}error:${NC} $*" >&2; }
+info() { echo -e "${CYAN}»${NC} $*"; }
+ok()   { echo -e "${GREEN}✓${NC} $*"; }
+
+usage() {
+  cat <<EOF
+${BOLD}openclaw-tv${NC} — AI agent physical body
+
+${BOLD}USAGE${NC}
+  openclaw-tv speak <text> [--voice <name>] [--avatar]
+  openclaw-tv serve [--port 8080]
+  openclaw-tv daemon
+  openclaw-tv status
+  openclaw-tv config
+
+${BOLD}COMMANDS${NC}
+  speak    Generate speech and play it
+  serve    Start the avatar web server
+  daemon   Start the TTS daemon (keeps model warm)
+  status   Show service status
+  config   Show or edit configuration
+
+${BOLD}SPEAK OPTIONS${NC}
+  --voice    Voice name (default: Hugo)
+             Available: Bella, Jasper, Luna, Bruno, Rosie, Hugo, Kiki, Leo
+  --avatar   Also push audio to the avatar display
+
+${BOLD}EXAMPLES${NC}
+  openclaw-tv speak "Hello, world!" --avatar
+  openclaw-tv speak "Greetings." --voice Bella
+  openclaw-tv serve
+  openclaw-tv daemon &
+  openclaw-tv status
+EOF
+}
+
+cmd_speak() {
+  local text="" voice="Hugo" push_avatar=false
+
+  # Parse args
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --voice) voice="$2"; shift 2 ;;
+      --avatar) push_avatar=true; shift ;;
+      --) shift; text="$*"; break ;;
+      -*) err "Unknown option: $1"; exit 1 ;;
+      *) text="$1"; shift ;;
+    esac
+  done
+
+  [[ -z "$text" ]] && { err "No text provided. Usage: openclaw-tv speak \"text\""; exit 1; }
+
+  # Load default voice from config if not specified
+  if [[ -f "$CONFIG_FILE" ]]; then
+    default_voice=$(python3 -c "import json,sys; d=json.load(open('$CONFIG_FILE')); print(d.get('voice','Hugo'))" 2>/dev/null || echo "Hugo")
+    [[ "$voice" == "Hugo" ]] && voice="$default_voice"
+  fi
+
+  info "Generating speech: \"$text\" (voice: $voice)"
+
+  local wav_path
+
+  # Try daemon first (fast), fall back to direct (slow)
+  if [[ -S "$SOCK_PATH" ]]; then
+    result=$(echo "{\"text\":$(python3 -c "import json,sys; print(json.dumps(sys.argv[1]))" "$text"),\"voice\":\"$voice\"}" \
+      | nc -U "$SOCK_PATH" 2>/dev/null || echo '{"ok":false,"error":"nc failed"}')
+    ok_val=$(echo "$result" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('ok','false'))" 2>/dev/null || echo "false")
+
+    if [[ "$ok_val" == "True" ]]; then
+      wav_path=$(echo "$result" | python3 -c "import json,sys; print(json.load(sys.stdin)['wav'])")
+      gen_time=$(echo "$result" | python3 -c "import json,sys; print(json.load(sys.stdin).get('gen_time','?'))")
+      rtf=$(echo "$result" | python3 -c "import json,sys; print(json.load(sys.stdin).get('rtf','?'))")
+      ok "Generated via daemon in ${gen_time}s (${rtf}x realtime)"
+    else
+      info "Daemon unavailable, loading model directly (first run ~16s)..."
+      wav_path=$("$VENV_PYTHON" -c "
+import soundfile as sf, time
+from kittentts import KittenTTS
+m = KittenTTS('KittenML/kitten-tts-nano-0.8')
+t0 = time.time()
+audio = m.model.generate('$text', voice='$voice', clean_text=False)
+sf.write('/tmp/openclaw-tv-speech.wav', audio, 24000)
+print('/tmp/openclaw-tv-speech.wav')
+" 2>/dev/null)
+    fi
+  else
+    info "TTS daemon not running. Loading model directly (first run ~16s)..."
+    info "Tip: run 'openclaw-tv daemon' in the background for fast TTS."
+    wav_path=$("$VENV_PYTHON" - <<PYEOF
+import soundfile as sf, time, json, sys
+from kittentts import KittenTTS
+m = KittenTTS('KittenML/kitten-tts-nano-0.8')
+t0 = time.time()
+audio = m.model.generate("""$text""", voice='$voice', clean_text=False)
+sf.write('/tmp/openclaw-tv-speech.wav', audio, 24000)
+print('/tmp/openclaw-tv-speech.wav')
+PYEOF
+    )
+  fi
+
+  [[ -z "$wav_path" || ! -f "$wav_path" ]] && { err "TTS generation failed"; exit 1; }
+
+  if [[ "$push_avatar" == "true" ]]; then
+    # Copy to static dir and push to avatar
+    mkdir -p "$STATIC_DIR"
+    cp "$wav_path" "$STATIC_DIR/speech.wav"
+
+    text_json=$(python3 -c "import json,sys; print(json.dumps(sys.argv[1]))" "$text")
+    ts=$((EPOCHSECONDS * 1000))
+    curl -s -X POST http://localhost:8080/api/state \
+      -H 'Content-Type: application/json' \
+      -d "{\"message\":$text_json,\"audio\":\"/static/speech.wav?t=$ts\",\"mood\":\"talking\"}" \
+      > /dev/null || warn "Could not reach avatar (is 'openclaw-tv serve' running?)"
+    ok "Audio pushed to avatar"
+    # Also play locally
+    aplay "$wav_path" 2>/dev/null &
+  else
+    aplay "$wav_path" 2>/dev/null
+    ok "Done."
+  fi
+}
+
+cmd_serve() {
+  local port=8080
+  [[ "${1:-}" == "--port" ]] && port="$2"
+  info "Starting avatar web server on :$port"
+  info "  Avatar: http://$(hostname -I | awk '{print $1}'):$port/avatar/index.html"
+  exec "$VENV_PYTHON" "$INSTALL_DIR/server/server.py" --port "$port" --dir "$INSTALL_DIR"
+}
+
+cmd_daemon() {
+  info "Starting TTS daemon (Kitten TTS nano)..."
+  info "Socket: $SOCK_PATH"
+  exec "$VENV_PYTHON" "$INSTALL_DIR/server/tts-daemon.py"
+}
+
+cmd_status() {
+  echo -e "${BOLD}openclaw-tv status${NC}"
+  echo ""
+
+  # Web server
+  if systemctl --user is-active --quiet openclaw-tv 2>/dev/null; then
+    echo -e "  Web server:  ${GREEN}● running${NC} (systemd)"
+  elif curl -sf http://localhost:8080/api/state > /dev/null 2>&1; then
+    echo -e "  Web server:  ${GREEN}● running${NC} (port 8080)"
+  else
+    echo -e "  Web server:  ${RED}○ not running${NC}"
+    echo -e "               Run: ${CYAN}openclaw-tv serve${NC}"
+  fi
+
+  # TTS daemon
+  if systemctl --user is-active --quiet openclaw-tv-tts 2>/dev/null; then
+    echo -e "  TTS daemon:  ${GREEN}● running${NC} (systemd)"
+  elif [[ -S "$SOCK_PATH" ]]; then
+    echo -e "  TTS daemon:  ${GREEN}● running${NC} (socket present)"
+  else
+    echo -e "  TTS daemon:  ${RED}○ not running${NC}"
+    echo -e "               Run: ${CYAN}openclaw-tv daemon${NC}"
+  fi
+
+  # Avatar state
+  state=$(curl -sf http://localhost:8080/api/state 2>/dev/null || echo "")
+  if [[ -n "$state" ]]; then
+    mood=$(echo "$state" | python3 -c "import json,sys; print(json.load(sys.stdin).get('mood','?'))" 2>/dev/null)
+    echo ""
+    echo -e "  Avatar mood: ${CYAN}$mood${NC}"
+  fi
+
+  echo ""
+}
+
+cmd_config() {
+  if [[ ! -f "$CONFIG_FILE" ]]; then
+    err "Config not found at $CONFIG_FILE"
+    err "Run install.sh first."
+    exit 1
+  fi
+  if [[ "${1:-}" == "--edit" ]]; then
+    "${EDITOR:-nano}" "$CONFIG_FILE"
+  else
+    echo -e "${BOLD}Config: $CONFIG_FILE${NC}"
+    echo ""
+    cat "$CONFIG_FILE"
+  fi
+}
+
+# ─── Main ────────────────────────────────────────────────────────────────────
+case "${1:-}" in
+  speak)  shift; cmd_speak "$@" ;;
+  serve)  shift; cmd_serve "$@" ;;
+  daemon) shift; cmd_daemon ;;
+  status) cmd_status ;;
+  config) shift; cmd_config "${@:-}" ;;
+  help|--help|-h) usage ;;
+  "")     usage; exit 1 ;;
+  *)      err "Unknown command: $1"; usage; exit 1 ;;
+esac

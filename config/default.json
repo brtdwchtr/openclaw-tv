@@ -1,0 +1,16 @@
+{
+  "voice": "Hugo",
+  "model": "KittenML/kitten-tts-nano-0.8",
+  "port": 8080,
+  "sock_path": "/tmp/openclaw-tv-tts.sock",
+  "static_dir": "~/.openclaw-tv/static",
+  "moods": ["idle", "excited", "calm", "thinking", "happy", "curious"],
+  "voices": ["Bella", "Jasper", "Luna", "Bruno", "Rosie", "Hugo", "Kiki", "Leo"],
+  "avatar": {
+    "particle_count": 3000,
+    "idle_radius": 1.0,
+    "speak_radius": 0.55,
+    "blend_in": 0.35,
+    "blend_out": 0.015
+  }
+}
