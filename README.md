@@ -20,10 +20,11 @@
 ## ✨ What it does
 
 - **Particle cloud avatar** — 3,000 particles idle in murmuration-style curl-noise flow, then snap to a compact sphere when speaking
-- **Audio-reactive** — bass expands the cloud, mids add jitter, highs trigger sparkle bursts  
+- **Audio-reactive** — bass expands the cloud, mids add jitter, highs trigger sparkle bursts
 - **Rolling captions** — words appear word-by-word as the agent speaks
 - **Fast TTS** — Kitten TTS nano (14M params) runs on Pi 4 at ~0.7× realtime; pre-warmed daemon cuts cold start from 16s → 0.3s
 - **Simple API** — `POST /api/state` with `{"message":"Hello","mood":"excited"}` from anywhere on your network
+- **YouTube playback** — play any YouTube video fullscreen, auto-restores avatar when done
 - **Vintage CRT ready** — composite video output, tested on real CRTs via RF modulator
 
 ---
@@ -32,15 +33,69 @@
 
 ```bash
 # On your Raspberry Pi 4
-curl -sSL https://raw.githubusercontent.com/brtdwchtr/openclaw-tv/main/install.sh | bash
-
-# Start the services
-sudo systemctl start openclaw-tv
-sudo systemctl start openclaw-tv-tts
-
-# Make your agent speak
-openclaw-tv speak "Hello, I am alive." --avatar
+git clone https://github.com/brtdwchtr/openclaw-tv.git
+cd openclaw-tv
+bash install.sh
 ```
+
+The install script sets up Python 3.12, installs Kitten TTS with the correct PyTorch version, creates systemd services, and configures Chromium kiosk mode.
+
+---
+
+## 🎮 Usage
+
+### Make your agent speak
+
+```bash
+# Speak through the avatar (particles react to audio)
+codie-say "Hello, I am alive." --avatar
+
+# Speak via aplay only (no avatar)
+codie-say "Hello world."
+
+# With the full script (same thing)
+python3 speak.py "Hello from the network" --avatar
+```
+
+### Play YouTube videos
+
+```bash
+# Downloads, plays fullscreen, auto-restores avatar when done
+play-yt "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+```
+
+### HTTP API (from any language/agent)
+
+```bash
+# Set message + mood (avatar reacts)
+curl -X POST http://your-pi.local:8080/api/state \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"Hello!","mood":"excited"}'
+
+# Set audio (avatar plays + reacts to frequencies)
+curl -X POST http://your-pi.local:8080/api/state \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"Hello!","audio":"/static/speech.wav"}'
+
+# Read current state
+curl http://your-pi.local:8080/api/state
+```
+
+### Remote control via SSH
+
+```bash
+# Speak from your Mac/laptop
+ssh pi@your-pi.local 'codie-say "Hello from remote!" --avatar'
+
+# Play a YouTube video remotely
+ssh pi@your-pi.local 'play-yt "https://youtu.be/dQw4w9WgXcQ"'
+```
+
+### Available voices
+`Hugo` (default) · `Bella` · `Jasper` · `Luna` · `Bruno` · `Rosie` · `Kiki` · `Leo`
+
+### Available moods
+`idle` · `excited` · `calm` · `thinking` · `happy` · `curious`
 
 ---
 
@@ -53,64 +108,59 @@ openclaw-tv speak "Hello, I am alive." --avatar
 │  ┌──────────────┐   HTTP POST /api/state   ┌─────────────────┐ │
 │  │  AI Agent    │ ──────────────────────── ▶│  Pi Web Server  │ │
 │  │  (anywhere)  │                          │  port 8080      │ │
-│  └──────────────┘   SSH + openclaw-tv      └────────┬────────┘ │
-│                      speak "..."                    │           │
+│  └──────────────┘   SSH + codie-say        └────────┬────────┘ │
 │                                                     │           │
 │  ┌──────────────────────────────────────────────────▼────────┐ │
 │  │                  Raspberry Pi 4                            │ │
 │  │                                                            │ │
 │  │  ┌─────────────┐    Unix socket    ┌──────────────────┐   │ │
-│  │  │ openclaw-tv │ ────────────────▶ │   TTS Daemon     │   │ │
-│  │  │    CLI      │  /tmp/.../tts.sock│  Kitten nano     │   │ │
-│  │  └─────────────┘                  │  model in memory │   │ │
-│  │         │                         └──────────────────┘   │ │
-│  │         │ aplay                                           │ │
+│  │  │  codie-say  │ ────────────────▶ │   TTS Daemon     │   │ │
+│  │  │  speak.py   │  /tmp/codie-tts   │  Kitten nano     │   │ │
+│  │  └─────────────┘      .sock        │  model in memory │   │ │
+│  │         │                          └──────────────────┘   │ │
+│  │         │ --avatar                                         │ │
 │  │         ▼                                                  │ │
 │  │  ┌─────────────┐   Chromium kiosk   ┌──────────────────┐ │ │
 │  │  │   Speaker   │                    │  Avatar (Three.js)│ │ │
-│  │  └─────────────┘                    │  particle cloud  │ │ │
-│  │                                     └────────┬─────────┘ │ │
+│  │  │  (browser)  │                    │  particle cloud  │ │ │
+│  │  └─────────────┘                    └────────┬─────────┘ │ │
 │  └──────────────────────────────────────────────│───────────┘ │
 │                                                  │              │
 └──────────────────────────────────────────────────│──────────────┘
-                                                   │ composite video
+                                                   │ HDMI / composite
                                             ┌──────▼──────┐
-                                            │  CRT TV  📺 │
+                                            │  Display 📺  │
                                             └─────────────┘
 ```
 
 ---
 
-## 🎮 Usage
+## 📁 Project Structure
 
-### Make your agent speak
-```bash
-# Via SSH (from anywhere)
-ssh pi@your-pi.local 'openclaw-tv speak "Hello, world!" --avatar'
-
-# With specific voice
-ssh pi@your-pi.local 'openclaw-tv speak "Greetings." --voice Bella --avatar'
-
-# Via HTTP API (from any language)
-curl -X POST http://your-pi.local:8080/api/state \
-  -H 'Content-Type: application/json' \
-  -d '{"message":"Hello from the network","mood":"excited"}'
 ```
-
-### CLI commands
-```bash
-openclaw-tv speak "text" [--voice Hugo] [--avatar]  # Generate + play TTS
-openclaw-tv serve                                    # Start web server
-openclaw-tv daemon                                   # Start TTS daemon (foreground)
-openclaw-tv status                                   # Check service status
-openclaw-tv config                                   # Show/edit config
+openclaw-tv/
+├── avatar.html          # Particle cloud avatar (Three.js)
+├── server.py            # Web server with /api/state API
+├── speak.py             # TTS client (daemon-first, fallback to direct)
+├── codie-tts-daemon.py  # TTS daemon (keeps model pre-warmed)
+├── index.html           # Teletext-style clock display
+├── start-kiosk.sh       # Chromium kiosk launcher
+├── bin/
+│   ├── codie-say        # Quick TTS wrapper
+│   ├── play-yt          # YouTube download + fullscreen play
+│   └── openclaw-tv      # Full CLI (install, daemon, serve, speak)
+├── config/
+│   ├── default.json     # Default configuration
+│   └── systemd/         # Systemd service templates
+├── docs/
+│   ├── hardware.md      # Pi wiring, CRT connection, TRRS cable
+│   ├── setup.md         # Full installation guide
+│   └── troubleshooting.md
+├── skill/
+│   ├── SKILL.md         # OpenClaw agent skill definition
+│   └── scripts/speak.sh # Skill speak helper
+└── install.sh           # Automated installer
 ```
-
-### Available voices
-`Hugo` (default) · `Bella` · `Jasper` · `Luna` · `Bruno` · `Rosie` · `Kiki` · `Leo`
-
-### Available moods
-`idle` · `excited` · `calm` · `thinking` · `happy` · `curious`
 
 ---
 
@@ -124,7 +174,7 @@ openclaw-tv config                                   # Show/edit config
 
 ## 🔌 OpenClaw Skill
 
-If you're using OpenClaw, drop the `skill/` folder into your agent's skills directory:
+If you're using [OpenClaw](https://openclaw.ai), drop the `skill/` folder into your agent's skills directory:
 
 ```bash
 cp -r skill/ ~/clawd/skills/openclaw-tv/
