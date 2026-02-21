@@ -1,0 +1,48 @@
+<html>
+<head>
+<style>
+@font-face { font-family: 'IBM VGA'; src: url('ibm-vga.ttf') format('truetype'); }
+* { cursor: none !important; }
+body { background: black; color: white; font-family: 'IBM VGA', monospace; margin: 0; overflow: hidden; display: flex; align-items: center; justify-content: center; height: 100vh; }
+#ascii { font-size: 12px; line-height: 12px; white-space: pre; }
+video { display: none; }
+canvas { display: none; }
+</style>
+</head>
+<body>
+<pre id='ascii'></pre>
+<video id='vid' autoplay loop playsinline></video>
+<canvas id='can'></canvas>
+<script>
+var chars = ' .:-=+*#%@';
+var cols = 60, rows = 36;
+var vid = document.getElementById('vid');
+var can = document.getElementById('can');
+var ctx = can.getContext('2d');
+var ascii = document.getElementById('ascii');
+can.width = cols;
+can.height = rows;
+
+vid.src = 'test.mp4';
+vid.play();
+
+function render() {
+  ctx.drawImage(vid, 0, 0, cols, rows);
+  var img = ctx.getImageData(0, 0, cols, rows);
+  var s = '';
+  for (var y = 0; y < rows; y++) {
+    for (var x = 0; x < cols; x++) {
+      var i = (y * cols + x) * 4;
+      var brightness = (img.data[i] + img.data[i+1] + img.data[i+2]) / 3;
+      var ci = Math.floor(brightness / 256 * chars.length);
+      s += chars[Math.min(ci, chars.length - 1)];
+    }
+    s += '\n';
+  }
+  ascii.textContent = s;
+  requestAnimationFrame(render);
+}
+vid.addEventListener('playing', render);
+</script>
+</body>
+</html>

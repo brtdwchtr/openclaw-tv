@@ -1,0 +1,28 @@
+#!/bin/bash
+# play-yt - Download and play YouTube video on the TV
+# Usage: play-yt <url>
+set -e
+
+URL="$1"
+if [ -z "$URL" ]; then
+  echo "Usage: play-yt <youtube-url>"
+  exit 1
+fi
+
+export DISPLAY=:0
+VIDFILE="/tmp/yt-playing.mp4"
+
+echo "Downloading..."
+~/.local/bin/yt-dlp -f "best[height<=480]" -o "$VIDFILE" --force-overwrites "$URL" 2>&1
+
+echo "Playing..."
+pkill -f mpv 2>/dev/null || true
+pkill -f chromium 2>/dev/null || true
+sleep 1
+
+mpv --fs --no-terminal "$VIDFILE"
+
+echo "Restoring avatar..."
+sleep 1
+setsid chromium --kiosk --no-sandbox --disable-gpu --password-store=basic --autoplay-policy=no-user-gesture-required http://localhost:8080/avatar.html </dev/null >/dev/null 2>&1 &
+echo "Done!"

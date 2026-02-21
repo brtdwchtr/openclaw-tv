@@ -1,13 +1,3 @@
-<!DOCTYPE html>
-<!--
-  OpenClaw TV Avatar v12
-  Particle cloud avatar with:
-  - Murmuration-style curl noise idle behavior
-  - Snap-compact on audio (BLEND_IN=0.35)
-  - Audio-reactive (bass=expand, mids=jitter, highs=sparkle)
-  - Rolling word-by-word captions (32px, 70% width)
-  - Polls /api/state every 500ms
--->
 <html>
 <head>
 <style>
@@ -20,7 +10,7 @@ audio { display: none; }
 </head>
 <body>
 <div id="msg"></div>
-<audio id="aud" preload="auto"></audio>
+<audio id="aud" preload="auto" autoplay></audio>
 <script>
 var state={mood:'idle',message:'',audio:''};
 var audioCtx,analyser,dataArray,audioSource,audioEl;
@@ -58,19 +48,24 @@ function getAudioData(){
 
 // === CURL NOISE for murmuration flow fields ===
 function snoise3(x,y,z){
+  // Simplified 3D noise via sine mixing (fast, good enough for flow)
   return Math.sin(x*1.7+y*2.3)*Math.cos(y*1.9+z*3.1)*Math.sin(z*2.7+x*1.3);
 }
 function curlNoise(x,y,z,t){
   var e=0.01;
+  // Partial derivatives via finite differences
   var n1,n2;
+  // curl.x = dNz/dy - dNy/dz
   n1=snoise3(x,y+e,z+t);n2=snoise3(x,y-e,z+t);
   var dzy=(n1-n2)/(2*e);
   n1=snoise3(x,y+t,z+e);n2=snoise3(x,y+t,z-e);
   var dyz=(n1-n2)/(2*e);
+  // curl.y = dNx/dz - dNz/dx
   n1=snoise3(x,y,z+e+t);n2=snoise3(x,y,z-e+t);
   var dxz=(n1-n2)/(2*e);
   n1=snoise3(x+e,y,z+t);n2=snoise3(x-e,y,z+t);
   var dzx=(n1-n2)/(2*e);
+  // curl.z = dNy/dx - dNx/dy
   n1=snoise3(x+e,y+t,z);n2=snoise3(x-e,y+t,z);
   var dyx=(n1-n2)/(2*e);
   n1=snoise3(x+t,y+e,z);n2=snoise3(x+t,y-e,z);
@@ -85,7 +80,7 @@ var renderer=new THREE.WebGLRenderer({antialias:false});
 renderer.setSize(window.innerWidth,window.innerHeight);renderer.setPixelRatio(1);
 document.body.appendChild(renderer.domElement);
 
-var COUNT=3000;
+var COUNT=1500;
 var geometry=new THREE.BufferGeometry();
 var positions=new Float32Array(COUNT*3);
 var basePositions=new Float32Array(COUNT*3);
@@ -122,8 +117,9 @@ function startCaptions(text,durationSec){
   msgEl.textContent='';
   msgEl.style.opacity=1;
   if(captionTimer)clearInterval(captionTimer);
+  // Show ~3-4 words at a time, rolling window
   var msPerWord=Math.max(150,(durationSec*1000)/captionWords.length);
-  var WINDOW=6;
+  var WINDOW=6; // max words visible at once
   captionTimer=setInterval(function(){
     if(captionIdx>=captionWords.length){clearInterval(captionTimer);return;}
     captionIdx++;
@@ -133,11 +129,26 @@ function startCaptions(text,durationSec){
 }
 var speaking=false;
 var speakBlend=0;
+var speakSafetyTimer=null;
 var IDLE_RADIUS=1.0;
 var SPEAK_RADIUS=0.55;
 var BLEND_IN=0.35;
 var BLEND_OUT=0.015;
 
+function endSpeaking(){
+  if(!speaking)return;
+  speaking=false;
+  captionIdx=captionWords.length;
+  var msgEl=document.getElementById('msg');
+  var WINDOW=6;
+  var start=Math.max(0,captionIdx-WINDOW);
+  msgEl.textContent=captionWords.slice(start,captionIdx).join(' ');
+  if(captionTimer)clearInterval(captionTimer);
+  if(speakSafetyTimer){clearTimeout(speakSafetyTimer);speakSafetyTimer=null;}
+  setTimeout(function(){msgEl.style.opacity=0;msgEl.textContent='';},2000);
+}
+
+// Murmuration: wandering attractor points that particles flow toward
 var attractors=[
   {x:0,y:0,z:0,vx:0,vy:0,vz:0},
   {x:1,y:0.5,z:0,vx:0,vy:0,vz:0},
@@ -147,11 +158,13 @@ var attractors=[
 function updateAttractors(t){
   for(var a=0;a<attractors.length;a++){
     var att=attractors[a];
+    // Slow wandering paths via curl noise
     var c=curlNoise(att.x*0.3,att.y*0.3,att.z*0.3,t*0.08+a*10);
     att.vx+=c.x*0.003;
     att.vy+=c.y*0.003;
     att.vz+=c.z*0.003;
     att.x+=att.vx;att.y+=att.vy;att.z+=att.vz;
+    // Keep within bounds
     var d=Math.sqrt(att.x*att.x+att.y*att.y+att.z*att.z);
     if(d>1.0){att.vx-=att.x*0.02;att.vy-=att.y*0.02;att.vz-=att.z*0.02;}
     att.vx*=0.98;att.vy*=0.98;att.vz*=0.98;
@@ -169,19 +182,18 @@ function pollState(){
       audioEl.load();
       audioEl.play().catch(function(e){console.log('play err',e);});
       speaking=true;
+      // Estimate duration: ~10 words per 4 seconds for TTS
       var words=(state.message||'').split(/\s+/).length;
       var estDuration=Math.max(3,words*0.45);
       if(state.message)startCaptions(state.message,estDuration);
-      audioEl.onended=function(){
-        speaking=false;
-        captionIdx=captionWords.length;
-        var msgEl=document.getElementById('msg');
-        var WINDOW=6;
-        var start=Math.max(0,captionIdx-WINDOW);
-        msgEl.textContent=captionWords.slice(start,captionIdx).join(' ');
-        if(captionTimer)clearInterval(captionTimer);
-        setTimeout(function(){msgEl.style.opacity=0;},2000);
-      };
+      audioEl.onended=function(){endSpeaking();};
+      audioEl.onerror=function(){endSpeaking();};
+      // Safety timeout: force reset after estimated duration + buffer
+      if(speakSafetyTimer)clearTimeout(speakSafetyTimer);
+      speakSafetyTimer=setTimeout(function(){endSpeaking();},estDuration*1000+5000);
+    } else if(!s.audio&&speaking){
+      // Audio cleared from API but we're still in speaking state — reset
+      endSpeaking();
     } else if(changed&&!s.audio){
       var msgEl=document.getElementById('msg');
       if(state.message){msgEl.textContent=state.message;msgEl.style.opacity=1;}
@@ -199,13 +211,16 @@ function animate(){
   updateAttractors(time);
   var pos=geometry.attributes.position.array;
 
+  // Blend speaking state
   if(speaking){ speakBlend+=(1-speakBlend)*BLEND_IN; }
   else{ speakBlend+=(0-speakBlend)*BLEND_OUT; }
 
-  var idleBlend=1-speakBlend;
+  var idleBlend=1-speakBlend;  // how much murmuration behavior to apply
+
   var baseScale=IDLE_RADIUS*(1-speakBlend)+SPEAK_RADIUS*speakBlend;
   var breathe=1.0+Math.sin(time*0.8)*0.02*(1-speakBlend*0.5);
 
+  // Audio-reactive (speaking mode)
   var expand=1.0+smoothBass*1.0*speakBlend;
   var jitter=smoothMid*0.15*speakBlend;
   var burstChance=smoothHigh*0.1*speakBlend;
@@ -221,11 +236,13 @@ function animate(){
 
     // === MURMURATION (idle) ===
     if(idleBlend>0.01){
+      // Curl noise flow field — each particle follows divergence-free flow
       var curl=curlNoise(px*0.8,py*0.8,pz*0.8,time*0.1+ph*0.1);
       velocities[ix]+=curl.x*0.003*idleBlend;
       velocities[iy]+=curl.y*0.003*idleBlend;
       velocities[iz]+=curl.z*0.003*idleBlend;
 
+      // Nearest attractor pull (creates flocking streams)
       var nearest=0,nearDist=999;
       for(var a=0;a<attractors.length;a++){
         var ax=attractors[a].x-px,ay=attractors[a].y-py,az=attractors[a].z-pz;
@@ -235,16 +252,19 @@ function animate(){
       var att=attractors[nearest];
       var adx=att.x-px,ady=att.y-py,adz=att.z-pz;
       var aLen=Math.sqrt(adx*adx+ady*ady+adz*adz)||1;
+      // Gentle pull toward attractor (not direct, slightly tangential for swooping)
       var pullStr=0.004*idleBlend;
       velocities[ix]+=(adx/aLen)*pullStr+(-ady/aLen)*pullStr*0.3;
       velocities[iy]+=(ady/aLen)*pullStr+(adx/aLen)*pullStr*0.3;
       velocities[iz]+=(adz/aLen)*pullStr;
 
+      // Neighbor alignment (approximate: use nearby index as proxy)
       var ni=((i+1)%COUNT)*3;
       velocities[ix]+=(velocities[ni]-velocities[ix])*0.02*idleBlend;
       velocities[iy]+=(velocities[ni+1]-velocities[iy])*0.02*idleBlend;
       velocities[iz]+=(velocities[ni+2]-velocities[iz])*0.02*idleBlend;
 
+      // Soft boundary — keep flock roughly centered
       var dist=Math.sqrt(px*px+py*py+pz*pz);
       if(dist>1.5){
         var push=0.012*(dist-1.5)*idleBlend;
@@ -272,16 +292,19 @@ function animate(){
       velocities[iy]+=px*swirlAmt*0.002;
     }
 
+    // Apply velocity
     pos[ix]+=velocities[ix];
     pos[iy]+=velocities[iy];
     pos[iz]+=velocities[iz];
 
+    // Pull toward sphere (strong when speaking, very gentle when idle)
     var scale=baseScale*breathe*expand;
     var spherePull=speakBlend*pullBack*1.5+idleBlend*0.012;
     pos[ix]+=(bx*scale-pos[ix])*spherePull;
     pos[iy]+=(by*scale-pos[iy])*spherePull;
     pos[iz]+=(bz*scale-pos[iz])*spherePull;
 
+    // Damping — less when idle for more flowing motion
     var d=damping*speakBlend+0.96*idleBlend;
     velocities[ix]*=d;
     velocities[iy]*=d;
@@ -290,6 +313,7 @@ function animate(){
 
   geometry.attributes.position.needsUpdate=true;
 
+  // Rotation
   points.rotation.y+=0.001+smoothTotal*0.012*speakBlend;
   points.rotation.x=Math.sin(time*0.15)*0.03;
 
